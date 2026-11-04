@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Happy Birthday</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#030207;
+    -webkit-font-smoothing:antialiased;
+  }
+  body {
+    font-family:-apple-system, "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", Arial, sans-serif;
+    cursor:pointer; user-select:none; -webkit-user-select:none;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #stage { position:fixed; inset:0; display:block; }
+
+  .sub {
+    position:fixed; left:50%; bottom:30%; transform:translateX(-50%);
+    text-align:center; pointer-events:none;
+    opacity:0; transition:opacity 2.4s cubic-bezier(.2,.8,.3,1);
+  }
+  .sub.on { opacity:1; }
+  .rule {
+    width:70px; height:1px; margin:0 auto 24px;
+    background:linear-gradient(90deg, rgba(201,165,88,0), #c9a558, rgba(201,165,88,0));
+    transform:scaleX(0); transition:transform 1.8s cubic-bezier(.2,.8,.3,1) .4s;
+  }
+  .sub.on .rule { transform:scaleX(1); }
+  .cn {
+    font-size:17px; letter-spacing:9px; color:#fdf4de; font-weight:400;
+    text-indent:9px;
+    text-shadow:0 0 22px rgba(255,212,144,.7), 0 0 62px rgba(255,172,82,.34);
+  }
+  .en {
+    margin-top:16px; font-size:10px; letter-spacing:5px;
+    color:#d3bc90; text-transform:lowercase; font-weight:300;
+  }
+
+  .hint {
+    position:fixed; left:50%; bottom:9.5%; transform:translateX(-50%);
+    font-size:9.5px; letter-spacing:4.5px; color:#b39c74;
+    opacity:0; transition:opacity 2s ease; pointer-events:none;
+    white-space:nowrap; text-indent:4.5px;
+  }
+  .hint.on { opacity:.85; }
+
+  /* 窄屏：压缩字距，避免副标题折行 */
+  @media (max-width: 680px) {
+    .sub { bottom: 27%; }
+    .rule { width: 48px; margin-bottom: 18px; }
+    .cn { font-size: 13px; letter-spacing: 4px; text-indent: 4px; white-space: nowrap; }
+    .en { font-size: 8px; letter-spacing: 2.5px; margin-top: 12px; white-space: nowrap; }
+    .hint { font-size: 8px; letter-spacing: 2.5px; bottom: 11%; }
+  }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+
+<div class="sub" id="sub">
+  <div class="rule"></div>
+  <div class="cn">愿这一年对你温柔一点</div>
+  <div class="en">may this year be gentle with you</div>
+</div>
+
+<div class="hint" id="hint">点击任意处 · 放一朵烟花</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ==========================================================
+     想加名字就改这一行。
+     填上以后，粒子会在「HAPPY BIRTHDAY」「生日快乐」「名字」之间轮播。
+     例： var NAME = '小林';
+     ========================================================== */
+  var NAME = '';
+
+  var canvas = document.getElementById('stage');
+  var ctx = canvas.getContext('2d');
+
+  var W = 0, H = 0, DPR = 1;
+  var bgGrad = null, glowGrad = null, vigGrad = null;
+
+  var particles = [];
+  var fireworks = [];
+  var stars = [];
+  var bokeh = [];
+  var targets = [];
+  var wordsCache = null;
+  var wordIdx = 0;
+  var lastWordSwap = 0;
+  var currentWord = '';
+  var wordAt = 0;
+
+  var clockMs = 0, burstDone = false;
+  var nextFw = 0, fwIdx = 0;
+  var mouse = { x: -9999, y: -9999, inside: false };
+
+  // ?t=1 直接跳到成型状态（仅调试用，正常打开不受影响）
+  var QS = new URLSearchParams(location.search);
+  var SKIP_MS = parseFloat(QS.get('t')) || 0;
+  var START_WORD = parseInt(QS.get('w'), 10) || 0;
+  var NO_SWAP = QS.get('noswap') === '1';
+  var NO_SWAP = QS.get('noswap') === '1';
+
+  var SPRITE_GOLD = null, SPRITE_WHITE = null;
+  var NEB = [];
+
+  var CN_RE = /[\u4e00-\u9fa5]/;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  function getWords() {
+    var arr = ['HAPPY BIRTHDAY', '生日快乐'];
+    if (NAME && NAME.length) arr.push(NAME);
+    if (W > 0 && W < 780) arr[0] = 'HAPPY\nBIRTHDAY';
+    return arr;
+  }
+
+  // ---------- 粒子精灵（一次性预渲染，靠 drawImage 快速发光）----------
+  function makeSprite(cIn, cMid, cOut) {
+    var c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    var x = c.getContext('2d');
+    var g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, cIn);
+    g.addColorStop(0.22, cMid);
+    g.addColorStop(1, cOut);
+    x.fillStyle = g;
+    x.beginPath();
+    x.arc(32, 32, 32, 0, Math.PI * 2);
+    x.fill();
+    return c;
+  }
+
+  function initSprites() {
+    SPRITE_GOLD = makeSprite('rgba(255,255,250,1)', 'rgba(255,226,158,.86)', 'rgba(255,182,72,0)');
+    SPRITE_WHITE = makeSprite('rgba(255,255,255,1)', 'rgba(222,238,255,.66)', 'rgba(176,206,255,0)');
+  }
+
+  // ---------- 文字排版（供粒子采样与辉光共用）----------
+  function layoutWord(word) {
+    var lines = word.split('\n');
+    var lineCount = lines.length;
+    var longest = 1;
+    for (var li = 0; li < lineCount; li++) {
+      if (lines[li].length > longest) longest = lines[li].length;
+    }
+
+    var isCN = CN_RE.test(word);
+    var family = isCN
+      ? '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif'
+      : '"Helvetica Neue","Arial Black",Arial,sans-serif';
+    var weight = isCN ? 700 : 800;
+
+    var offW = Math.max(320, Math.floor(W));
+    var offH = Math.max(240, Math.floor(H));
+    var narrow = W < 700;
+    var maxW = W * (narrow ? 0.86 : 0.74);
+    var maxH = H * (narrow ? 0.38 : 0.30);
+    var fs = Math.min(
+      maxW / Math.max(1, longest) * (isCN ? 1.05 : 1.55),
+      maxH / lineCount
+    );
+
+    var probe = document.createElement('canvas').getContext('2d');
+    probe.font = weight + ' ' + Math.floor(fs) + 'px ' + family;
+    var widest = 0;
+    for (var lj = 0; lj < lineCount; lj++) {
+      var mw = probe.measureText(lines[lj]).width;
+      if (mw > widest) widest = mw;
+    }
+    if (widest > maxW) fs = fs * maxW / widest;
+    if (fs * lineCount > maxH) fs = Math.floor(maxH / lineCount);
+
+    var lineH = fs * 1.12;
+    var cy = H * (W < 700 ? 0.455 : 0.475);
+    var startY = cy - (lineH * lineCount) / 2 + lineH / 2;
+
+    return {
+      lines: lines, fs: fs, family: family, weight: weight,
+      lineH: lineH, startY: startY, cy: cy,
+      offW: offW, offH: offH
+    };
+  }
+
+  // ---------- 文字转粒子目标点 ----------
+  function buildTargets(word) {
+    if (wordsCache && wordsCache[word]) return wordsCache[word];
+    if (!wordsCache) wordsCache = {};
+
+    var L = layoutWord(word);
+    var off = document.createElement('canvas');
+    off.width = L.offW; off.height = L.offH;
+    var o = off.getContext('2d');
+
+    o.font = L.weight + ' ' + Math.floor(L.fs) + 'px ' + L.family;
+    o.textAlign = 'center';
+    o.textBaseline = 'middle';
+    o.fillStyle = '#fff';
+    for (var lk = 0; lk < L.lines.length; lk++) {
+      o.fillText(L.lines[lk], off.width / 2, L.startY + lk * L.lineH);
+    }
+
+    var img = o.getImageData(0, 0, off.width, off.height).data;
+
+    var pts = [];
+    for (var gap = 3; gap <= 16; gap++) {
+      pts = [];
+      for (var y = 0; y < off.height; y += gap) {
+        for (var x = 0; x < off.width; x += gap) {
+          if (img[(y * off.width + x) * 4 + 3] > 130) {
+            pts.push({ x: x, y: y });
+          }
+        }
+      }
+      if (pts.length <= 4200) break;
+    }
+
+    wordsCache[word] = pts;
+    return pts;
+  }
+
+  // ---------- 字身辉光：让笔画有"发光体"的厚度，而不只是散点 ----------
+  var glowCache = {};
+
+  function buildGlow(word) {
+    if (glowCache[word]) return glowCache[word];
+    var L = layoutWord(word);
+    var cw = L.offW, ch = L.offH;
+
+    var base = document.createElement('canvas');
+    base.width = cw; base.height = ch;
+    var b = base.getContext('2d');
+    b.font = L.weight + ' ' + Math.floor(L.fs) + 'px ' + L.family;
+    b.textAlign = 'center';
+    b.textBaseline = 'middle';
+    b.fillStyle = '#fff';
+    for (var i = 0; i < L.lines.length; i++) {
+      b.fillText(L.lines[i], cw / 2, L.startY + i * L.lineH);
+    }
+
+    b.globalCompositeOperation = 'source-in';
+    var lg = b.createLinearGradient(0, L.cy - L.fs * 0.62, 0, L.cy + L.fs * 0.62);
+    lg.addColorStop(0, 'rgba(255,248,220,1)');
+    lg.addColorStop(0.42, 'rgba(255,208,136,1)');
+    lg.addColorStop(1, 'rgba(255,166,84,1)');
+    b.fillStyle = lg;
+    b.fillRect(0, 0, cw, ch);
+
+    var soft = document.createElement('canvas');
+    soft.width = cw; soft.height = ch;
+    var sc = soft.getContext('2d');
+    if (typeof sc.filter === 'string') {
+      sc.filter = 'blur(' + Math.round(Math.max(7, L.fs * 0.055)) + 'px)';
+      sc.drawImage(base, 0, 0);
+      sc.filter = 'none';
+      sc.globalCompositeOperation = 'lighter';
+      sc.globalAlpha = 0.55;
+      sc.drawImage(base, 0, 0);
+    } else {
+      sc.drawImage(base, 0, 0);
+    }
+
+    glowCache[word] = { soft: soft, solid: base };
+    return glowCache[word];
+  }
+
+  function drawTextGlow(word, amt) {
+    if (amt <= 0.01 || !word) return;
+    var g = glowCache[word] || buildGlow(word);
+    if (!g) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.52 * amt;
+    ctx.drawImage(g.soft, 0, 0);
+    ctx.globalAlpha = 0.15 * amt;
+    ctx.drawImage(g.solid, 0, 0);
+    ctx.restore();
+  }
+
+  // ---------- 粒子 ----------
+  function Particle() {
+    this.x = W / 2 + rand(-14, 14);
+    this.y = H * 0.44 + rand(-14, 14);
+    this.vx = 0;
+    this.vy = 0;
+    this.tx = W / 2;
+    this.ty = H * 0.44;
+    this.size = rand(2.2, 5.4);
+    this.white = Math.random() < 0.13;
+    this.alpha = 0;
+    this.phase = rand(0, Math.PI * 2);
+    this.flick = rand(0.5, 2.2);
+    this.ox = rand(-1.6, 1.6);
+    this.oy = rand(-1.6, 1.6);
+  }
+
+  function buildParticles() {
+    var words = getWords();
+    var maxLen = 0;
+    for (var i = 0; i < words.length; i++) {
+      var n = buildTargets(words[i]).length;
+      if (n > maxLen) maxLen = n;
+    }
+    var N = Math.max(600, Math.ceil(maxLen * 1.24));
+    particles = [];
+    for (var j = 0; j < N; j++) particles.push(new Particle());
+    applyWord(START_WORD);
+  }
+
+  function applyWord(idx) {
+    var words = getWords();
+    wordIdx = idx % words.length;
+    currentWord = words[wordIdx];
+    wordAt = clockMs;
+    var tg = buildTargets(currentWord);
+    if (!tg.length) return;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var t = tg[i % tg.length];
+      p.tx = t.x + p.ox;
+      p.ty = t.y + p.oy;
+    }
+  }
+
+  function doBurst() {
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var a = rand(0, Math.PI * 2);
+      var sp = rand(3, 19);
+      p.vx = Math.cos(a) * sp;
+      p.vy = Math.sin(a) * sp;
+    }
+  }
+
+  // ---------- 星尘 ----------
+  function buildStars() {
+    stars = [];
+    var n = Math.min(220, Math.round(W * H / 7600));
+    for (var i = 0; i < n; i++) {
+      stars.push({
+        x: rand(0, W), y: rand(0, H),
+        r: rand(0.35, 1.5),
+        p: rand(0, Math.PI * 2),
+        sp: rand(0.2, 0.9),
+        drift: rand(1.5, 7),
+        a: rand(0.10, 0.55)
+      });
+    }
+  }
+
+  // 大颗散景光斑：制造景深与朦胧感
+  function buildBokeh() {
+    bokeh = [];
+    var n = 8;
+    for (var i = 0; i < n; i++) {
+      bokeh.push({
+        x: rand(0, W), y: rand(0, H),
+        r: rand(90, 300),
+        vx: rand(-7, 7), vy: rand(-5, 5),
+        a: rand(0.022, 0.06),
+        cold: Math.random() < 0.28
+      });
+    }
+  }
+
+  function drawBokeh(dt) {
+    var f = Math.min(dt / 16.667, 3);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < bokeh.length; i++) {
+      var b = bokeh[i];
+      b.x += b.vx * f;
+      b.y += b.vy * f;
+      if (b.x < -b.r) b.x = W + b.r;
+      if (b.x > W + b.r) b.x = -b.r;
+      if (b.y < -b.r) b.y = H + b.r;
+      if (b.y > H + b.r) b.y = -b.r;
+      ctx.globalAlpha = b.a;
+      ctx.drawImage(b.cold ? SPRITE_WHITE : SPRITE_GOLD, b.x - b.r, b.y - b.r, b.r * 2, b.r * 2);
+    }
+    ctx.restore();
+  }
+
+  // ---------- 星云 ----------
+  function makeNeb(r, g, b) {
+    var c = document.createElement('canvas');
+    c.width = 256; c.height = 256;
+    var x = c.getContext('2d');
+    var gd = x.createRadialGradient(128, 128, 0, 128, 128, 128);
+    gd.addColorStop(0, 'rgba(' + r + ',' + g + ',' + b + ',.5)');
+    gd.addColorStop(0.38, 'rgba(' + r + ',' + g + ',' + b + ',.17)');
+    gd.addColorStop(1, 'rgba(' + r + ',' + g + ',' + b + ',0)');
+    x.fillStyle = gd;
+    x.fillRect(0, 0, 256, 256);
+    return c;
+  }
+
+  function initNebula() {
+    NEB = [
+      { img: makeNeb(96, 74, 214), x: 0.20, y: 0.24, r: 0.62, a: 0.105, sp: 0.000011, ph: 0.0 },
+      { img: makeNeb(38, 150, 168), x: 0.82, y: 0.34, r: 0.52, a: 0.075, sp: 0.000014, ph: 2.1 },
+      { img: makeNeb(214, 84, 150), x: 0.58, y: 0.88, r: 0.58, a: 0.055, sp: 0.000009, ph: 4.3 },
+      { img: makeNeb(52, 96, 200), x: 0.40, y: 0.06, r: 0.46, a: 0.065, sp: 0.000016, ph: 1.2 }
+    ];
+  }
+
+  function drawNebula(now) {
+    var md = Math.max(W, H);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < NEB.length; i++) {
+      var nb = NEB[i];
+      var rad = md * nb.r;
+      var x = nb.x * W + Math.sin(now * nb.sp + nb.ph) * W * 0.05;
+      var y = nb.y * H + Math.cos(now * nb.sp * 0.8 + nb.ph) * H * 0.04;
+      ctx.globalAlpha = nb.a * (0.78 + 0.22 * Math.sin(now * 0.00024 + nb.ph));
+      ctx.drawImage(nb.img, x - rad, y - rad, rad * 2, rad * 2);
+    }
+    ctx.restore();
+  }
+
+  // ---------- 尺寸 ----------
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    bgGrad = ctx.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.5, Math.max(W, H) * 0.78);
+    bgGrad.addColorStop(0, '#170b24');
+    bgGrad.addColorStop(0.42, '#0b0614');
+    bgGrad.addColorStop(1, '#030207');
+
+    glowGrad = ctx.createRadialGradient(W / 2, H * 0.44, 0, W / 2, H * 0.44, Math.max(W, H) * 0.42);
+    glowGrad.addColorStop(0, 'rgba(255,210,140,.13)');
+    glowGrad.addColorStop(0.45, 'rgba(196,140,222,.05)');
+    glowGrad.addColorStop(1, 'rgba(0,0,0,0)');
+
+    vigGrad = ctx.createRadialGradient(W / 2, H * 0.47, Math.min(W, H) * 0.18, W / 2, H * 0.5, Math.max(W, H) * 0.78);
+    vigGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    vigGrad.addColorStop(0.62, 'rgba(0,0,0,0.16)');
+    vigGrad.addColorStop(1, 'rgba(0,0,0,0.58)');
+
+    buildStars();
+    buildBokeh();
+    wordsCache = null;
+    applyWord(wordIdx);
+  }
+
+  // ---------- 烟花 ----------
+  var HUE_SET = [45, 32, 350, 195, 285, 15];
+
+  function launchFirework(x, y) {
+    // 按屏幕大小缩放，手机上也看得见
+    var k = clamp(Math.min(W, H) / 820, 0.75, 1.5);
+    var hue = HUE_SET[(Math.random() * HUE_SET.length) | 0] + rand(-8, 8);
+    var n = 96 + ((Math.random() * 46) | 0);
+    for (var i = 0; i < n; i++) {
+      var a = rand(0, Math.PI * 2);
+      var sp = Math.pow(Math.random(), 0.62) * rand(2.4, 9.6) * k;
+      fireworks.push({
+        x: x, y: y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life: 1,
+        decay: rand(0.006, 0.016),
+        hue: hue + rand(-14, 14),
+        size: rand(1.4, 3.4) * k
+      });
+    }
+    // 中心闪光
+    for (var k = 0; k < 14; k++) {
+      fireworks.push({
+        x: x, y: y,
+        vx: rand(-1.2, 1.2),
+        vy: rand(-1.2, 1.2),
+        life: 1,
+        decay: rand(0.03, 0.06),
+        hue: 48,
+        size: rand(4, 9) * k
+      });
+    }
+  }
+
+  function updateFireworks(dt) {
+    var f = Math.min(dt / 16.667, 3);
+    for (var i = fireworks.length - 1; i >= 0; i--) {
+      var p = fireworks[i];
+      p.vy += 0.055 * f;
+      p.vx *= Math.pow(0.985, f);
+      p.vy *= Math.pow(0.985, f);
+      p.x += p.vx * f;
+      p.y += p.vy * f;
+      p.life -= p.decay * f;
+      if (p.life <= 0) fireworks.splice(i, 1);
+    }
+  }
+
+  function drawFireworks() {
+    if (!fireworks.length) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < fireworks.length; i++) {
+      var p = fireworks[i];
+      var a = p.life * p.life;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (0.5 + p.life * 0.7), 0, Math.PI * 2);
+      ctx.fillStyle = 'hsla(' + p.hue + ',92%,' + (62 + p.life * 22) + '%,' + (a * 0.92) + ')';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ---------- 绘制 ----------
+  function drawBackdrop(now) {
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // 缓慢呼吸的中心辉光
+    var breathe = 0.62 + 0.38 * Math.sin(now * 0.00042);
+    ctx.save();
+    ctx.globalAlpha = breathe;
+    ctx.fillStyle = glowGrad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // 星尘
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < stars.length; i++) {
+      var s = stars[i];
+      var tw = 0.55 + 0.45 * Math.sin(now * 0.001 * s.sp + s.p);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(226,236,255,' + (s.a * tw) + ')';
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ---------- 主循环 ----------
+  var last = 0;
+
+  function frame(now) {
+    var dt = last ? Math.min(now - last, 50) : 16.667;
+    last = now;
+    clockMs += dt;
+    var el = clockMs;
+    var f = Math.min(dt / 16.667, 3);
+
+    // 开场：中心一个光点，1.5 秒后炸开
+    if (!burstDone && el > 1500) {
+      burstDone = true;
+      doBurst();
+      setTimeout(function () { document.getElementById('sub').classList.add('on'); }, 3000);
+      setTimeout(function () { document.getElementById('hint').classList.add('on'); }, 5200);
+      lastWordSwap = now;
+    }
+
+    drawBackdrop(now);
+    drawNebula(now);
+    drawBokeh(dt);
+
+    if (!burstDone) {
+      // 开场光点
+      var pulse = 0.35 + 0.65 * Math.pow(Math.sin(el * 0.0016), 2);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      var gs = 46 + pulse * 34;
+      ctx.globalAlpha = 0.5 + pulse * 0.5;
+      ctx.drawImage(SPRITE_GOLD, W / 2 - gs / 2, H * 0.44 - gs / 2, gs, gs);
+      var gs2 = 13 + pulse * 7;
+      ctx.globalAlpha = 1;
+      ctx.drawImage(SPRITE_WHITE, W / 2 - gs2 / 2, H * 0.44 - gs2 / 2, gs2, gs2);
+      ctx.restore();
+    } else {
+      // ---- 更新粒子 ----
+      var pull = clamp((el - 2050) / 2400, 0, 1);
+      var eased = pull * pull * (3 - 2 * pull);
+      var w = Math.max(W, H);
+
+      // 掉帧时拆成多个子步，保证弹簧积分稳定（否则粒子会在目标点附近原地抖）
+      var steps = Math.min(3, Math.max(1, Math.ceil(dt / 16.667)));
+      var sf = dt / steps / 16.667;
+
+      for (var i = 0; i < particles.length; i++) {
+        var p = particles[i];
+
+        for (var st = 0; st < steps; st++) {
+          // 弹簧归位
+          if (eased > 0) {
+            p.vx += (p.tx - p.x) * 0.019 * eased * sf;
+            p.vy += (p.ty - p.y) * 0.019 * eased * sf;
+          }
+
+          // 鼠标斥力
+          if (mouse.inside) {
+            var dx = p.x - mouse.x, dy = p.y - mouse.y;
+            var d2 = dx * dx + dy * dy;
+            if (d2 < 20000) {
+              var d = Math.sqrt(d2) || 1;
+              var force = (1 - d / 141) * 7.5;
+              p.vx += dx / d * force * sf;
+              p.vy += dy / d * force * sf;
+            }
+          }
+
+          var damp = Math.pow(0.918, sf);
+          p.vx *= damp;
+          p.vy *= damp;
+          p.x += p.vx * sf;
+          p.y += p.vy * sf;
+        }
+
+        // 淡入
+        if (p.alpha < 1) p.alpha = Math.min(1, p.alpha + 0.014 * f);
+
+        p.phase += 0.02 * p.flick * f;
+      }
+
+      // ---- 字身辉光（比粒子先画，垫在底下）----
+      var ga = clamp((el - wordAt - 1100) / 1600, 0, 1);
+      ga = ga * ga * (3 - 2 * ga);
+      drawTextGlow(currentWord, ga);
+
+      // ---- 画粒子 ----
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (var j = 0; j < particles.length; j++) {
+        var q = particles[j];
+        var shimmer = 0.88 + 0.12 * Math.sin(q.phase);
+        var sz = q.size * shimmer;
+        ctx.globalAlpha = q.alpha * shimmer * 0.9;
+        var sp = q.white ? SPRITE_WHITE : SPRITE_GOLD;
+        ctx.drawImage(sp, q.x - sz / 2, q.y - sz / 2, sz, sz);
+      }
+      ctx.restore();
+
+      // ---- 轮播换词 ----
+      var words = getWords();
+      if (!NO_SWAP && words.length > 1 && now - lastWordSwap > 8200) {
+        lastWordSwap = now;
+        applyWord(wordIdx + 1);
+      }
+    }
+
+    // 字成形之后，天上自己开始放烟花
+    if (!NO_SWAP && burstDone && el > 6200 && el > nextFw) {
+      var fx = rand(W * 0.12, W * 0.88);
+      var fy = rand(H * 0.06, H * 0.27);
+      launchFirework(fx, fy);
+      fwIdx++;
+      nextFw = el + (fwIdx < 4 ? rand(1400, 2400) : rand(2600, 4800));
+    }
+
+    updateFireworks(dt);
+    drawFireworks();
+
+    // 四周压暗，把视线收到中间
+    if (vigGrad) {
+      ctx.save();
+      ctx.fillStyle = vigGrad;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- 交互 ----------
+  function onPointerDown(e) {
+    var x, y;
+    if (e.touches && e.touches.length) {
+      x = e.touches[0].clientX; y = e.touches[0].clientY;
+    } else {
+      x = e.clientX; y = e.clientY;
+    }
+    launchFirework(x, y);
+    mouse.x = x; mouse.y = y; mouse.inside = true;
+  }
+
+  function onPointerMove(e) {
+    var x, y;
+    if (e.touches && e.touches.length) {
+      x = e.touches[0].clientX; y = e.touches[0].clientY;
+    } else {
+      x = e.clientX; y = e.clientY;
+    }
+    mouse.x = x; mouse.y = y; mouse.inside = true;
+  }
+
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerleave', function () { mouse.inside = false; });
+  canvas.addEventListener('touchstart', function (e) {
+    e.preventDefault();
+    onPointerDown(e);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function (e) {
+    e.preventDefault();
+    onPointerMove(e);
+  }, { passive: false });
+  canvas.addEventListener('touchend', function () {
+    mouse.inside = false;
+  });
+
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(resize, 180);
+  });
+
+  // ---------- 启动 ----------
+  function fastForward() {
+    clockMs = 999999;
+    burstDone = true;
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      p.x = p.tx; p.y = p.ty;
+      p.vx = 0; p.vy = 0; p.alpha = 1;
+    }
+    document.getElementById('sub').classList.add('on');
+    document.getElementById('hint').classList.add('on');
+    lastWordSwap = performance.now();
+  }
+
+  function boot() {
+    initSprites();
+    initNebula();
+    resize();
+    buildParticles();
+    if (SKIP_MS > 0) fastForward();
+    requestAnimationFrame(frame);
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
