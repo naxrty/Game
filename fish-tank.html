@@ -1,0 +1,1126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>大肥鱼的鱼缸</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden; background:#04121f;
+    font-family:-apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing:antialiased; user-select:none; -webkit-user-select:none;
+    cursor:crosshair;
+  }
+  #tank { position:fixed; inset:0; display:block; }
+
+  .glass {
+    background:rgba(9,32,52,.42);
+    border:1px solid rgba(140,220,255,.14);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    border-radius:14px;
+    box-shadow:0 10px 40px rgba(0,0,0,.34);
+  }
+
+  #hud {
+    position:fixed; top:20px; left:20px; padding:14px 18px;
+    color:#cfeeff; font-size:13px; line-height:1.9;
+    letter-spacing:.3px; pointer-events:none; min-width:172px;
+  }
+  #hud .title {
+    font-size:15px; letter-spacing:2px; color:#eaf9ff;
+    font-weight:600; margin-bottom:4px;
+  }
+  #hud .sub { font-size:11px; color:#7fabc4; letter-spacing:1px; margin-bottom:9px; }
+  #hud .row { display:flex; justify-content:space-between; gap:16px; font-variant-numeric:tabular-nums; }
+  #hud .row span:first-child { color:#7fabc4; }
+  #hud .row span:last-child { color:#bfe9ff; }
+
+  #tips {
+    position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+    padding:11px 22px; color:#8db9d2; font-size:12px; letter-spacing:.8px;
+    white-space:nowrap; pointer-events:none; transition:opacity 1.4s ease;
+  }
+  #tips b { color:#bfe9ff; font-weight:500; }
+
+  #panel { position:fixed; top:20px; right:20px; display:flex; gap:9px; }
+  .btn {
+    width:40px; height:40px; border-radius:12px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    font-size:16px; color:#bfe9ff; transition:all .22s ease;
+    background:rgba(9,32,52,.42);
+    border:1px solid rgba(140,220,255,.14);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  }
+  .btn:hover { background:rgba(30,90,130,.55); transform:translateY(-1px); }
+  .btn:active { transform:translateY(0) scale(.96); }
+
+  #toast {
+    position:fixed; top:50%; left:50%; transform:translate(-50%,-50%) scale(.94);
+    padding:16px 26px; color:#dff4ff; font-size:13px; letter-spacing:.6px;
+    opacity:0; pointer-events:none; transition:all .5s cubic-bezier(.2,.8,.3,1);
+    text-align:center; line-height:1.7;
+  }
+  #toast.on { opacity:1; transform:translate(-50%,-50%) scale(1); }
+</style>
+</head>
+<body>
+<canvas id="tank"></canvas>
+
+<div id="hud" class="glass">
+  <div class="title">大肥鱼的鱼缸</div>
+  <div class="sub">THE FISH TANK · AQUARIUM</div>
+  <div class="row"><span>鱼</span><span id="stat-fish">8</span></div>
+  <div class="row"><span>饱食度</span><span id="stat-fed">100%</span></div>
+  <div class="row"><span>饲料</span><span id="stat-food">0</span></div>
+  <div class="row"><span>潮汐</span><span id="stat-time">白昼</span></div>
+</div>
+
+<div id="panel">
+  <div class="btn" id="btn-sound" title="声音">🔇</div>
+  <div class="btn" id="btn-reset" title="重新开始">↺</div>
+</div>
+
+<div id="tips" class="glass">点击水面 <b>撒饲料</b> · 点一下鱼 <b>摸摸它</b> · 按住拖动 <b>搅动水流</b></div>
+<div id="toast" class="glass"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('tank');
+  var ctx = canvas.getContext('2d');
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSand();
+  }
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  // ---------- 世界状态 ----------
+  var fishes = [];
+  var foods = [];
+  var bubbles = [];
+  var plankton = [];
+  var plants = [];
+  var farPlants = [];
+  var rays = [];
+  var sand = [];
+  var clock = 40;
+  var daylight = 1;
+  var running = true;
+  var lastSave = 0;
+  var eatTotal = 0;
+
+  var pointer = { x: -999, y: -999, down: false, px: 0, py: 0, vx: 0, vy: 0, still: 0 };
+
+  var MAX_FISH = 26;
+  var GROUND_RATIO = 0.845;
+
+  function groundY() { return H * GROUND_RATIO; }
+
+  function buildSand() {
+    sand = [];
+    var gy = groundY();
+    var step = 26;
+    for (var x = -40; x <= W + 40; x += step) {
+      sand.push({
+        x: x,
+        y: gy + Math.sin(x * 0.007) * 9 + Math.sin(x * 0.021 + 1.7) * 5 + rand(-2.5, 2.5)
+      });
+    }
+    buildPlants();
+    buildRays();
+  }
+
+  function buildPlants() {
+    plants = [];
+    var gy = groundY();
+    var n = Math.round(W / 62) + 5;
+    for (var i = 0; i < n; i++) {
+      var x = rand(-30, W + 30);
+      var segs = 7 + ((Math.random() * 7) | 0);
+      var h = rand(75, 235);
+      var nodes = [];
+      for (var s = 0; s <= segs; s++) {
+        nodes.push({
+          x: x + Math.sin(s * 0.9) * rand(3, 9),
+          y: gy - (h / segs) * s
+        });
+      }
+      plants.push({
+        nodes: nodes,
+        phase: rand(0, Math.PI * 2),
+        speed: rand(0.5, 1.1),
+        sway: rand(9, 26),
+        hue: rand(150, 178),
+        width: rand(3.4, 9.5),
+        alpha: rand(0.2, 0.46)
+      });
+    }
+    plants.sort(function (a, b) { return a.alpha - b.alpha; });
+    buildFar();
+  }
+
+  // 远景剪影：更远、更暗、几乎不动，用来撑出景深
+  function buildFar() {
+    farPlants = [];
+    var gy = groundY();
+    var n = Math.round(W / 128) + 2;
+    for (var i = 0; i < n; i++) {
+      var x = rand(-40, W + 40);
+      var segs = 6 + ((Math.random() * 6) | 0);
+      var h = rand(150, 340);
+      var nodes = [];
+      for (var s2 = 0; s2 <= segs; s2++) {
+        nodes.push({
+          x: x + Math.sin(s2 * 0.8) * rand(4, 13),
+          y: gy - (h / segs) * s2
+        });
+      }
+      farPlants.push({
+        nodes: nodes,
+        phase: rand(0, Math.PI * 2),
+        speed: rand(0.26, 0.6),
+        sway: rand(6, 17),
+        hue: rand(196, 216),
+        width: rand(9, 22),
+        alpha: rand(0.05, 0.1)
+      });
+    }
+  }
+
+  function buildRays() {
+    rays = [];
+    var n = 7;
+    for (var i = 0; i < n; i++) {
+      rays.push({
+        x: rand(0, W),
+        w: rand(40, 150),
+        tilt: rand(-0.42, 0.42),
+        phase: rand(0, Math.PI * 2),
+        speed: rand(0.1, 0.28),
+        alpha: rand(0.05, 0.125)
+      });
+    }
+  }
+
+  // ---------- 鱼 ----------
+  // 取自真实热带鱼的色相：橙红 / 琥珀金 / 宝蓝 / 青绿 / 紫罗兰 / 玫红
+  var PALETTE = [12, 26, 38, 208, 186, 276, 336];
+  function pickHue() {
+    return (PALETTE[(Math.random() * PALETTE.length) | 0] + rand(-9, 9) + 360) % 360;
+  }
+
+  function Fish(x, y, hue, size, gen) {
+    this.x = x; this.y = y;
+    this.vx = rand(-30, 30);
+    this.vy = rand(-10, 10);
+    this.angle = 0;
+    this.hue = hue;
+    this.size = size || rand(16, 26);
+    this.hunger = rand(0.15, 0.5);
+    this.tail = rand(0, Math.PI * 2);
+    this.gen = gen || 0;
+    this.startled = 0;
+    this.eaten = 0;
+    this.bobPhase = rand(0, Math.PI * 2);
+    this.wanderPhase = rand(0, Math.PI * 2);
+    this.finPhase = rand(0, Math.PI * 2);
+  }
+
+  Fish.prototype.update = function (dt, all, foodList) {
+    var ax = 0, ay = 0;
+
+    // --- 群游：分离 / 对齐 / 聚合 ---
+    var sepX = 0, sepY = 0, aliX = 0, aliY = 0, cohX = 0, cohY = 0, cnt = 0;
+    var sepR = this.size * 2.9;
+    for (var i = 0; i < all.length; i++) {
+      var o = all[i];
+      if (o === this) continue;
+      var dx = o.x - this.x, dy = o.y - this.y;
+      var d2 = dx * dx + dy * dy;
+      if (d2 > 62500) continue;
+      var d = Math.sqrt(d2) || 1;
+      if (d < sepR) { sepX -= dx / d; sepY -= dy / d; }
+      if (d < this.size * 9) {
+        aliX += o.vx; aliY += o.vy;
+        cohX += o.x; cohY += o.y;
+        cnt++;
+      }
+    }
+    ax += sepX * 128;
+    ay += sepY * 128;
+    if (cnt > 0) {
+      aliX /= cnt; aliY /= cnt;
+      ax += (aliX - this.vx) * 0.42;
+      ay += (aliY - this.vy) * 0.42;
+      cohX /= cnt; cohY /= cnt;
+      ax += (cohX - this.x) * 0.2;
+      ay += (cohY - this.y) * 0.2;
+    }
+
+    // --- 找食物（饿了才积极）---
+    var best = null, bestD = 1e9;
+    var sight = 190 + this.hunger * 260;
+    for (var j = 0; j < foodList.length; j++) {
+      var f = foodList[j];
+      var fx = f.x - this.x, fy = f.y - this.y;
+      var fd = Math.sqrt(fx * fx + fy * fy);
+      if (fd < bestD && fd < sight) { bestD = fd; best = f; }
+    }
+    if (best) {
+      var pull = 150 + this.hunger * 320;
+      ax += (best.x - this.x) * pull / (bestD + 40);
+      ay += (best.y - this.y) * pull / (bestD + 40);
+    }
+
+    // --- 游荡 ---
+    this.wanderPhase += dt * 0.7;
+    ax += Math.cos(this.wanderPhase) * 9;
+    ay += Math.sin(this.wanderPhase * 1.4) * 7;
+
+    // --- 昼夜：夜里沉下去趴着 ---
+    if (daylight < 0.35) {
+      if (this.restY === undefined) {
+        this.restY = groundY() - 46 - (this.hue % 5) * 17 - this.size * 1.6;
+      }
+      ay += (this.restY - this.y) * 0.24 * (1 - daylight);
+    } else if (this.restY !== undefined) {
+      this.restY = undefined;
+    }
+
+    // --- 边界 ---
+    var m = 52 + this.size;
+    if (this.x < m) ax += (m - this.x) * 5.5;
+    if (this.x > W - m) ax -= (this.x - (W - m)) * 5.5;
+    if (this.y < 70) ay += (70 - this.y) * 5.5;
+    var gy = groundY() - 18;
+    if (this.y > gy) ay -= (this.y - gy) * 7;
+
+    // --- 躲鼠标 / 被吓 ---
+    if (this.startled > 0) {
+      this.startled -= dt;
+      var px = this.x - pointer.x, py = this.y - pointer.y;
+      var pd = Math.sqrt(px * px + py * py) || 1;
+      if (pd < 230) {
+        ax += px / pd * 480;
+        ay += py / pd * 480;
+      }
+    }
+
+    // --- 好奇：鼠标停住不动，附近的鱼会凑过来看看 ---
+    if (pointer.still > 0.9 && !pointer.down && this.startled <= 0) {
+      var qx = this.x - pointer.x, qy = this.y - pointer.y;
+      var qd = Math.sqrt(qx * qx + qy * qy);
+      if (qd < 300 && qd > 78) {
+        var pullf = (1 - qd / 300) * 30;
+        ax -= qx / qd * pullf;
+        ay -= qy / qd * pullf;
+      }
+    }
+
+    // --- 拖动的水流 ---
+    if (pointer.down && (Math.abs(pointer.vx) > 0.4 || Math.abs(pointer.vy) > 0.4)) {
+      var ddx = this.x - pointer.x, ddy = this.y - pointer.y;
+      var dd = Math.sqrt(ddx * ddx + ddy * ddy);
+      if (dd < 180) {
+        var force = (1 - dd / 180) * 26;
+        ax += pointer.vx * force;
+        ay += pointer.vy * force;
+      }
+    }
+
+    // --- 积分 ---
+    var tired = 1 - this.hunger * 0.42;
+    var maxSpeed = (52 + this.size * 2.6) * tired * (this.startled > 0 ? 2.4 : 1);
+    this.vx += ax * dt;
+    this.vy += ay * dt;
+
+    var sp = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    if (sp > maxSpeed) { this.vx = this.vx / sp * maxSpeed; this.vy = this.vy / sp * maxSpeed; }
+    if (sp < 6) { var a = rand(0, Math.PI * 2); this.vx += Math.cos(a) * 8; this.vy += Math.sin(a) * 8; }
+
+    // 阻尼
+    this.vx *= 0.985;
+    this.vy *= 0.978;
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // 朝向平滑
+    var target = Math.atan2(this.vy, this.vx);
+    var diff = target - this.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.angle += diff * Math.min(1, dt * 7);
+
+    // 尾鳍
+    this.tail += dt * (5 + sp * 0.055);
+    this.finPhase += dt * 3.2;
+    this.bobPhase += dt * 1.06;
+
+    // 饥饿
+    this.hunger = clamp(this.hunger + dt * 0.0072, 0, 1);
+  };
+
+  Fish.prototype.attractiveness = function () { return this.hunger; };
+
+  Fish.prototype.draw = function (t) {
+    var s = this.size;
+    var hungry = this.hunger;
+    var light = lerp(0.5, 1, daylight);
+    var sat = lerp(38, 66, 1 - hungry * 0.5);
+    var lum = lerp(46, 60, 1 - hungry * 0.35) * light;
+
+    var body = 'hsl(' + this.hue + ',' + sat + '%,' + lum + '%)';
+    var bodyDark = 'hsl(' + this.hue + ',' + sat + '%,' + (lum * 0.62) + '%)';
+    var bodyLight = 'hsl(' + ((this.hue + 22) % 360) + ',' + sat + '%,' + (lum * 1.35) + '%)';
+
+    ctx.save();
+    ctx.translate(this.x, this.y + Math.sin(this.bobPhase) * 1.3);
+    ctx.rotate(this.angle);
+    if (Math.abs(this.angle) > Math.PI / 2) ctx.scale(1, -1);
+
+    var wag = Math.sin(this.tail) * 0.55;
+
+    // 尾巴
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.85, 0);
+    ctx.quadraticCurveTo(-s * 1.5, -s * 0.45 + wag * s * 0.7, -s * 1.95, -s * 0.72 + wag * s * 1.15);
+    ctx.quadraticCurveTo(-s * 1.55, wag * s * 0.5, -s * 1.95, s * 0.72 + wag * s * 1.15);
+    ctx.quadraticCurveTo(-s * 1.5, s * 0.45 + wag * s * 0.7, -s * 0.85, 0);
+    ctx.closePath();
+    var tailGrad = ctx.createLinearGradient(-s * 1.9, 0, -s * 0.85, 0);
+    tailGrad.addColorStop(0, 'hsla(' + this.hue + ',' + sat + '%,' + (lum * 0.8) + '%,.55)');
+    tailGrad.addColorStop(1, 'hsla(' + this.hue + ',' + sat + '%,' + (lum * 0.7) + '%,.9)');
+    ctx.fillStyle = tailGrad;
+    ctx.fill();
+
+    // 背鳍
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.15, -s * 0.52);
+    ctx.quadraticCurveTo(-s * 0.55, -s * 1.05, -s * 1.0, -s * 0.5);
+    ctx.closePath();
+    ctx.fillStyle = 'hsla(' + this.hue + ',' + sat + '%,' + (lum * 0.9) + '%,.5)';
+    ctx.fill();
+
+    // 身体
+    var g = ctx.createLinearGradient(0, -s * 0.7, 0, s * 0.7);
+    g.addColorStop(0, bodyLight);
+    g.addColorStop(0.45, body);
+    g.addColorStop(1, bodyDark);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 1.12, s * 0.77, 0, 0, Math.PI * 2);
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    // 腹部高光
+    ctx.beginPath();
+    ctx.ellipse(s * 0.16, s * 0.2, s * 0.72, s * 0.28, 0.04, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.09 * light) + ')';
+    ctx.fill();
+
+    // 胸鳍
+    var finSwing = Math.sin(this.finPhase) * 0.35;
+    ctx.beginPath();
+    ctx.ellipse(s * 0.22, s * 0.16, s * 0.3, s * 0.15, 0.75 + finSwing, 0, Math.PI * 2);
+    ctx.fillStyle = 'hsla(' + this.hue + ',' + sat + '%,' + (lum * 1.15) + '%,.38)';
+    ctx.fill();
+
+    // 眼睛
+    var ex = s * 0.64, ey = -s * 0.12;
+    ctx.beginPath();
+    ctx.arc(ex, ey, s * 0.215, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(250,253,255,' + (0.86 * light + 0.12) + ')';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(ex + s * 0.05, ey, s * 0.105, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(12,22,34,.92)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(ex + s * 0.09, ey - s * 0.05, s * 0.035, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    ctx.fill();
+
+    // 嘴
+    ctx.beginPath();
+    ctx.moveTo(s * 1.14, s * 0.1);
+    ctx.lineTo(s * 1.24, s * 0.17);
+    ctx.strokeStyle = 'hsla(' + this.hue + ',40%,25%,.4)';
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    ctx.restore();
+  };
+
+  // ---------- 食物 ----------
+  function spawnFood(x, y, n) {
+    for (var i = 0; i < n; i++) {
+      if (foods.length > 130) break;
+      foods.push({
+        x: x + rand(-22, 22),
+        y: y + rand(-14, 14),
+        vx: rand(-9, 9),
+        vy: rand(-4, 14),
+        r: rand(1.7, 3.1),
+        life: rand(16, 26),
+        rot: rand(0, 6.28)
+      });
+    }
+  }
+
+  function updateFoods(dt) {
+    var gy = groundY();
+    for (var i = foods.length - 1; i >= 0; i--) {
+      var f = foods[i];
+      f.vy += 22 * dt;
+      f.vx *= 0.975;
+      f.vy = Math.min(f.vy, 46);
+      f.x += f.vx * dt;
+      f.y += f.vy * dt;
+      f.rot += dt * 0.6;
+      if (f.y > gy - 3) { f.y = gy - 3; f.vy = 0; f.vx *= 0.8; }
+      f.life -= dt * 0.55;
+      if (f.life <= 0) foods.splice(i, 1);
+    }
+  }
+
+  function fishEat() {
+    for (var i = foods.length - 1; i >= 0; i--) {
+      var f = foods[i];
+      for (var j = 0; j < fishes.length; j++) {
+        var fi = fishes[j];
+        var dx = fi.x - f.x, dy = fi.y - f.y;
+        if (dx * dx + dy * dy < 210) {
+          foods.splice(i, 1);
+          fi.hunger = clamp(fi.hunger - 0.16, 0, 1);
+          fi.size = Math.min(fi.size + 0.07, 32);
+          fi.eaten++;
+          eatTotal++;
+          if (audioOn) blip(fi.size);
+          // 吃东西冒个小泡
+          bubbles.push({ x: f.x, y: f.y, r: rand(1, 2.4), v: rand(18, 40), p: rand(0, 6.28), life: 1, sw: rand(.6, 1.6) });
+          tryBreed();
+          break;
+        }
+      }
+    }
+  }
+
+  function tryBreed() {
+    if (fishes.length >= MAX_FISH) return;
+    if (eatTotal % 24 !== 0) return;
+    if (Math.random() > 0.4) return;
+    var parent = fishes[(Math.random() * fishes.length) | 0];
+    if (!parent || parent.hunger > 0.4) return;
+    var child = new Fish(
+      parent.x + rand(-20, 20),
+      parent.y + rand(-20, 20),
+      (parent.hue + rand(-16, 16) + 360) % 360,
+      Math.max(9, parent.size * 0.55),
+      parent.gen + 1
+    );
+    child.hunger = 0.3;
+    fishes.push(child);
+    toast('一条小鱼出生了 · 第 ' + (child.gen + 1) + ' 代');
+    for (var k = 0; k < 10; k++) {
+      bubbles.push({ x: child.x, y: child.y, r: rand(1, 3), v: rand(20, 55), p: rand(0, 6.28), life: 1, sw: rand(.6, 1.8) });
+    }
+  }
+
+  // ---------- 气泡 / 浮游 ----------
+  function initBubbles() {
+    bubbles = [];
+    for (var i = 0; i < 26; i++) {
+      bubbles.push({
+        x: rand(0, W), y: rand(0, H),
+        r: rand(1.8, 5.4), v: rand(12, 46),
+        p: rand(0, 6.28), life: 1, sw: rand(.5, 1.7)
+      });
+    }
+  }
+
+  function updateBubbles(dt) {
+    for (var i = bubbles.length - 1; i >= 0; i--) {
+      var b = bubbles[i];
+      b.y -= b.v * dt;
+      b.p += dt * b.sw;
+      b.x += Math.sin(b.p) * 15 * dt;
+      if (b.y < -12) {
+        bubbles.splice(i, 1);
+        if (bubbles.length < 34) {
+          bubbles.push({
+            x: rand(0, W), y: groundY() + rand(0, 12),
+            r: rand(1.8, 5.4), v: rand(12, 46),
+            p: rand(0, 6.28), life: 1, sw: rand(.5, 1.7)
+          });
+        }
+      }
+    }
+  }
+
+  function initPlankton() {
+    plankton = [];
+    var n = Math.min(150, Math.round(W * H / 11000));
+    for (var i = 0; i < n; i++) {
+      plankton.push({
+        x: rand(0, W), y: rand(0, H),
+        r: rand(0.5, 1.8),
+        p: rand(0, 6.28),
+        sp: rand(0.16, 0.6),
+        drift: rand(3, 12),
+        hue: rand(160, 205)
+      });
+    }
+  }
+
+  function updatePlankton(dt) {
+    for (var i = 0; i < plankton.length; i++) {
+      var p = plankton[i];
+      p.p += dt * p.sp;
+      p.y -= p.drift * dt * 0.28;
+      p.x += Math.sin(p.p) * dt * 7;
+      if (p.y < -4) { p.y = H + 4; p.x = rand(0, W); }
+      if (p.x < -4) p.x = W + 4;
+      if (p.x > W + 4) p.x = -4;
+    }
+  }
+
+  // ---------- 渲染 ----------
+  function drawBackground() {
+    var night = 1 - daylight;
+
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    if (daylight > 0.5) {
+      var t = (daylight - 0.5) * 2;
+      sky.addColorStop(0, 'rgb(' + (13 + 30 * t) + ',' + (47 + 46 * t) + ',' + (79 + 50 * t) + ')');
+      sky.addColorStop(0.5, 'rgb(' + (6 + 10 * t) + ',' + (27 + 26 * t) + ',' + (51 + 28 * t) + ')');
+      sky.addColorStop(1, 'rgb(' + (2 + 3 * t) + ',' + (11 + 12 * t) + ',' + (23 + 14 * t) + ')');
+    } else {
+      var t2 = daylight * 2;
+      sky.addColorStop(0, 'rgb(' + (8 + 10 * t2) + ',' + (26 + 26 * t2) + ',' + (46 + 38 * t2) + ')');
+      sky.addColorStop(0.52, 'rgb(' + (5 + 4 * t2) + ',' + (15 + 18 * t2) + ',' + (30 + 26 * t2) + ')');
+      sky.addColorStop(1, 'rgb(' + (2 + 2 * t2) + ',' + (8 + 8 * t2) + ',' + (17 + 13 * t2) + ')');
+    }
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    // 光柱
+    if (daylight > 0.12) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (var i = 0; i < rays.length; i++) {
+        var r = rays[i];
+        var xx = r.x + Math.sin(clock * r.speed + r.phase) * 60;
+        var a = r.alpha * daylight * (0.7 + 0.3 * Math.sin(clock * r.speed * 2 + r.phase));
+        var g = ctx.createLinearGradient(xx, 0, xx + r.tilt * H * 0.6, H * 0.86);
+        g.addColorStop(0, 'rgba(150,220,255,' + a + ')');
+        g.addColorStop(0.55, 'rgba(110,190,240,' + a * 0.42 + ')');
+        g.addColorStop(1, 'rgba(80,160,220,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(xx - r.w * 0.16, 0);
+        ctx.lineTo(xx + r.w * 0.16, 0);
+        ctx.lineTo(xx + r.tilt * H * 0.6 + r.w * 0.85, H * 0.9);
+        ctx.lineTo(xx + r.tilt * H * 0.6 - r.w * 0.85, H * 0.9);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // 浮游生物（夜里发光）
+    ctx.save();
+    var pg = 1 - daylight;
+    for (var k = 0; k < plankton.length; k++) {
+      var p = plankton[k];
+      var glow = 0.16 + pg * 0.75;
+      var tw = 0.72 + 0.28 * Math.sin(clock * 1.6 + p.p * 2);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, 6.2832);
+      ctx.fillStyle = 'hsla(' + p.hue + ',90%,72%,' + (glow * tw) + ')';
+      if (pg > 0.35 && p.r > 1.15) {
+        ctx.shadowColor = 'hsla(' + p.hue + ',95%,70%,.85)';
+        ctx.shadowBlur = 7 * pg;
+      }
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.restore();
+  }
+
+  function drawSand() {
+    var gy = groundY();
+    ctx.beginPath();
+    ctx.moveTo(-40, H + 10);
+    ctx.lineTo(sand[0].x, sand[0].y);
+    for (var i = 1; i < sand.length; i++) {
+      var p0 = sand[i - 1], p1 = sand[i];
+      ctx.quadraticCurveTo(p0.x, p0.y, (p0.x + p1.x) / 2, (p0.y + p1.y) / 2);
+    }
+    ctx.lineTo(W + 40, H + 10);
+    ctx.closePath();
+    var sg = ctx.createLinearGradient(0, gy - 10, 0, H);
+    var dim = lerp(0.5, 1, daylight);
+    sg.addColorStop(0, 'rgba(' + Math.round(72 * dim) + ',' + Math.round(86 * dim) + ',' + Math.round(96 * dim) + ',.94)');
+    sg.addColorStop(1, 'rgba(' + Math.round(16 * dim) + ',' + Math.round(24 * dim) + ',' + Math.round(31 * dim) + ',.99)');
+    ctx.fillStyle = sg;
+    ctx.fill();
+
+    // 沙面高光
+    ctx.beginPath();
+    ctx.moveTo(sand[0].x, sand[0].y);
+    for (var j = 1; j < sand.length; j++) {
+      var q0 = sand[j - 1], q1 = sand[j];
+      ctx.quadraticCurveTo(q0.x, q0.y, (q0.x + q1.x) / 2, (q0.y + q1.y) / 2);
+    }
+    ctx.strokeStyle = 'rgba(190,235,255,' + (0.15 * daylight + 0.04) + ')';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+  }
+
+  function drawPlants(t) {
+    var dim = lerp(0.45, 1, daylight);
+    for (var i = 0; i < plants.length; i++) {
+      var pl = plants[i];
+      var n = pl.nodes;
+      var len = n.length;
+      var pts = [];
+      for (var s = 0; s < len; s++) {
+        var k = s / (len - 1);
+        var sway = Math.sin(t * pl.speed + pl.phase + k * 2.1) * pl.sway * k * k;
+        pts.push({ x: n[s].x + sway, y: n[s].y });
+      }
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (var m = 1; m < len - 1; m++) {
+        var xc = (pts[m].x + pts[m + 1].x) / 2;
+        var yc = (pts[m].y + pts[m + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[m].x, pts[m].y, xc, yc);
+      }
+      ctx.quadraticCurveTo(pts[len - 2].x, pts[len - 2].y, pts[len - 1].x, pts[len - 1].y);
+      ctx.strokeStyle = 'hsla(' + pl.hue + ',54%,47%,' + (pl.alpha * dim) + ')';
+      ctx.lineWidth = pl.width;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+  }
+
+  function drawFarPlants(t) {
+    var dim = lerp(0.6, 1, daylight);
+    for (var i = 0; i < farPlants.length; i++) {
+      var pl = farPlants[i];
+      var n = pl.nodes;
+      var pts = [];
+      for (var s = 0; s < n.length; s++) {
+        var k = s / (n.length - 1);
+        var sway = Math.sin(t * pl.speed + pl.phase + k * 2.1) * pl.sway * k * k;
+        pts.push({ x: n[s].x + sway, y: n[s].y });
+      }
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (var m = 1; m < pts.length - 1; m++) {
+        ctx.quadraticCurveTo(pts[m].x, pts[m].y, (pts[m].x + pts[m + 1].x) / 2, (pts[m].y + pts[m + 1].y) / 2);
+      }
+      ctx.quadraticCurveTo(pts[pts.length - 2].x, pts[pts.length - 2].y, pts[pts.length - 1].x, pts[pts.length - 1].y);
+      ctx.strokeStyle = 'hsla(' + pl.hue + ',58%,46%,' + (pl.alpha * dim) + ')';
+      ctx.lineWidth = pl.width;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+  }
+
+  function drawBubbles() {
+    for (var i = 0; i < bubbles.length; i++) {
+      var b = bubbles[i];
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, 6.2832);
+      ctx.strokeStyle = 'rgba(190,235,255,' + (0.3 + daylight * 0.22) + ')';
+      ctx.lineWidth = 0.9;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(b.x - b.r * 0.28, b.y - b.r * 0.3, b.r * 0.3, 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.3 * daylight + 0.12) + ')';
+      ctx.fill();
+    }
+  }
+
+  function drawFoods() {
+    ctx.save();
+    for (var i = 0; i < foods.length; i++) {
+      var f = foods[i];
+      var a = clamp(f.life / 8, 0, 1);
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, f.r, 0, 6.2832);
+      ctx.fillStyle = 'rgba(255,' + (218 + Math.sin(f.rot) * 20) + ',150,' + (0.9 * a) + ')';
+      ctx.shadowColor = 'rgba(255,200,110,.85)';
+      ctx.shadowBlur = 9;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawVignette() {
+    var vg = ctx.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.24, W / 2, H * 0.5, Math.max(W, H) * 0.78);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,3,9,.72)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ---------- 主循环 ----------
+  var lastT = 0;
+
+  function frame(now) {
+    if (!running) return;
+    var dt = Math.min((now - lastT) / 1000 || 0.016, 0.05);
+    lastT = now;
+    clock += dt;
+
+    // 昼夜：3 分钟一个循环
+    var phase = (clock % 180) / 180;
+    daylight = clamp(0.5 + 0.5 * Math.cos(phase * Math.PI * 2), 0, 1);
+
+    ctx.clearRect(0, 0, W, H);
+    drawBackground();
+    drawFarPlants(clock);
+    drawSand();
+    drawPlants(clock);
+
+    pointer.still += dt;
+
+    updateBubbles(dt);
+    updateFoods(dt);
+    updatePlankton(dt);
+
+    for (var i = 0; i < fishes.length; i++) fishes[i].update(dt, fishes, foods);
+    fishEat();
+
+    drawFoods();
+    // 小鱼在前，大鱼在后
+    var sorted = fishes.slice().sort(function (a, b) { return a.size - b.size; });
+    for (var k = 0; k < sorted.length; k++) sorted[k].draw(clock);
+
+    drawBubbles();
+    drawVignette();
+
+    // 指针涟漪
+    if (pointer.down) {
+      ctx.beginPath();
+      ctx.arc(pointer.x, pointer.y, 26 + Math.sin(clock * 6) * 5, 0, 6.2832);
+      ctx.strokeStyle = 'rgba(160,225,255,.2)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    }
+
+    updateHud();
+
+    if (now - lastSave > 6000) { lastSave = now; save(); }
+
+    requestAnimationFrame(frame);
+  }
+
+  var hudEls = null, hudLast = {};
+  function setStat(key, val) {
+    if (hudLast[key] === val) return;
+    hudLast[key] = val;
+    if (hudEls[key]) hudEls[key].textContent = val;
+  }
+
+  function updateHud() {
+    if (!hudEls) {
+      hudEls = {
+        fish: document.getElementById('stat-fish'),
+        fed: document.getElementById('stat-fed'),
+        food: document.getElementById('stat-food'),
+        time: document.getElementById('stat-time')
+      };
+    }
+    var fed = 0;
+    for (var i = 0; i < fishes.length; i++) fed += (1 - fishes[i].hunger);
+    fed = fishes.length ? fed / fishes.length : 1;
+    var ph = clock % 180;
+    var dayText;
+    if (daylight > 0.9) dayText = '正午';
+    else if (daylight < 0.18) dayText = '深夜';
+    else dayText = ph < 90 ? '黄昏' : '黎明';
+
+    setStat('fish', String(fishes.length));
+    setStat('fed', Math.round(fed * 100) + '%');
+    setStat('food', String(foods.length));
+    setStat('time', dayText);
+  }
+
+  // ---------- 存档 ----------
+  var KEY = 'dafeiyu_tank_v1';
+
+  function save() {
+    try {
+      var data = {
+        t: Date.now(),
+        fish: fishes.map(function (f) {
+          return {
+            x: Math.round(f.x), y: Math.round(f.y),
+            h: f.hue, s: +f.size.toFixed(1),
+            g: f.gen, e: f.eaten,
+            u: +f.hunger.toFixed(3)
+          };
+        })
+      };
+      localStorage.setItem(KEY, JSON.stringify(data));
+    } catch (e) {}
+  }
+
+  function load() {
+    var raw = null;
+    try { raw = localStorage.getItem(KEY); } catch (e) {}
+    if (!raw) return false;
+    var d;
+    try { d = JSON.parse(raw); } catch (e) { return false; }
+    if (!d || !d.fish || !d.fish.length) return false;
+
+    var hours = Math.max(0, (Date.now() - (d.t || Date.now())) / 3600000);
+    var starve = Math.min(0.62, hours * 0.028);
+
+    fishes = d.fish.slice(0, MAX_FISH).map(function (r) {
+      var f = new Fish(
+        clamp(r.x, 40, Math.max(80, W - 40)),
+        clamp(r.y, 70, groundY() - 20),
+        r.h, r.s, r.g
+      );
+      f.eaten = r.e || 0;
+      f.hunger = clamp((r.u || 0) + starve, 0, 1);
+      return f;
+    });
+    return true;
+  }
+
+  // ---------- 交互 ----------
+  function pos(e) {
+    var t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function onDown(e) {
+    var p = pos(e);
+    pointer.down = true;
+    pointer.x = p.x; pointer.y = p.y;
+    pointer.px = p.x; pointer.py = p.y;
+    pointer.vx = 0; pointer.vy = 0;
+    pointer.still = 0;
+
+    // 点到鱼了？
+    var hit = null, hd = 1e9;
+    for (var i = 0; i < fishes.length; i++) {
+      var f = fishes[i];
+      var dx = f.x - p.x, dy = f.y - p.y;
+      var d = dx * dx + dy * dy;
+      if (d < 1600 && d < hd) { hd = d; hit = f; }
+    }
+    if (hit) {
+      // 摸鱼：周围一圈都惊一下，然后慢慢回来
+      for (var j = 0; j < fishes.length; j++) {
+        var o = fishes[j];
+        var ox = o.x - p.x, oy = o.y - p.y;
+        if (ox * ox + oy * oy < 34000) o.startled = rand(0.5, 1.1);
+      }
+      hit.size = Math.min(hit.size + 0.14, 32);
+      hit.hunger = clamp(hit.hunger - 0.05, 0, 1);
+      for (var k = 0; k < 13; k++) {
+        bubbles.push({
+          x: hit.x + rand(-10, 10), y: hit.y + rand(-10, 10),
+          r: rand(1, 3.2), v: rand(22, 58),
+          p: rand(0, 6.28), life: 1, sw: rand(.6, 1.8)
+        });
+      }
+      if (audioOn) blip(hit.size * 1.4);
+      return;
+    }
+
+    // 撒饲料
+    spawnFood(p.x, clamp(p.y, 30, groundY() - 10), 5);
+  }
+
+  function onMove(e) {
+    var p = pos(e);
+    if (pointer.x < -900) { pointer.x = p.x; pointer.y = p.y; return; }
+    pointer.vx = p.x - pointer.x;
+    pointer.vy = p.y - pointer.y;
+    pointer.still = 0;
+    pointer.x = p.x; pointer.y = p.y;
+    if (pointer.down && Math.random() < 0.22 && foods.length < 130) {
+      spawnFood(p.x, p.y, 1);
+    }
+  }
+
+  function onUp() { pointer.down = false; pointer.vx = 0; pointer.vy = 0; }
+
+  canvas.addEventListener('mousedown', onDown);
+  canvas.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  canvas.addEventListener('touchstart', function (e) { e.preventDefault(); onDown(e); }, { passive: false });
+  canvas.addEventListener('touchmove', function (e) { e.preventDefault(); onMove(e); }, { passive: false });
+  window.addEventListener('touchend', onUp);
+
+  // ---------- 音效（纯合成，无素材）----------
+  var audioCtx = null, audioOn = false, ambGain = null;
+
+  function initAudio() {
+    if (audioCtx) return;
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audioCtx = new AC();
+
+    // 水下环境底噪
+    var len = audioCtx.sampleRate * 3;
+    var buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    var data = buf.getChannelData(0);
+    var last = 0;
+    for (var i = 0; i < len; i++) {
+      var white = Math.random() * 2 - 1;
+      last = (last + 0.021 * white) / 1.021;
+      data[i] = last * 3.2;
+    }
+    var src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+
+    var lp = audioCtx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 380;
+    lp.Q.value = 0.7;
+
+    ambGain = audioCtx.createGain();
+    ambGain.gain.value = 0;
+
+    src.connect(lp);
+    lp.connect(ambGain);
+    ambGain.connect(audioCtx.destination);
+    src.start();
+
+    // 缓慢的潮汐起伏
+    var lfo = audioCtx.createOscillator();
+    var lfoGain = audioCtx.createGain();
+    lfo.frequency.value = 0.055;
+    lfoGain.gain.value = 0.018;
+    lfo.connect(lfoGain);
+    lfoGain.connect(ambGain.gain);
+    lfo.start();
+  }
+
+  var lastBlip = 0;
+  function blip(size) {
+    if (!audioCtx || !audioOn) return;
+    var t = audioCtx.currentTime;
+    if (t - lastBlip < 0.075) return;
+    lastBlip = t;
+    var o = audioCtx.createOscillator();
+    var g = audioCtx.createGain();
+    o.type = 'sine';
+    var base = 820 - Math.min(size, 20) * 22;
+    o.frequency.setValueAtTime(base, t);
+    o.frequency.exponentialRampToValueAtTime(base * 0.36, t + 0.13);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.055, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.17);
+    o.connect(g);
+    g.connect(audioCtx.destination);
+    o.start(t);
+    o.stop(t + 0.2);
+  }
+
+  var btnSound = document.getElementById('btn-sound');
+  btnSound.addEventListener('click', function (e) {
+    e.stopPropagation();
+    initAudio();
+    audioOn = !audioOn;
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    if (ambGain) {
+      ambGain.gain.cancelScheduledValues(audioCtx.currentTime);
+      ambGain.gain.setTargetAtTime(audioOn ? 0.09 : 0, audioCtx.currentTime, 1.2);
+    }
+    btnSound.textContent = audioOn ? '🔊' : '🔇';
+    if (audioOn) toast('水下世界的声音 · 已开启');
+  });
+
+  var btnReset = document.getElementById('btn-reset');
+  btnReset.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (!confirm('把鱼缸清空，重新养一缸？这会覆盖当前存档。')) return;
+    try { localStorage.removeItem(KEY); } catch (err) {}
+    fishes = [];
+    foods = [];
+    for (var i = 0; i < 8; i++) {
+      fishes.push(new Fish(rand(W * 0.15, W * 0.85), rand(H * 0.22, H * 0.72), pickHue(), rand(16, 26), 0));
+    }
+    toast('新的开始 · 六条鱼游进了空鱼缸');
+  });
+
+  // ---------- 提示 ----------
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('on'); }, 3200);
+  }
+
+  // ---------- 启动 ----------
+  function boot() {
+    resize();
+    initBubbles();
+    initPlankton();
+
+    var restored = load();
+    if (!restored) {
+      for (var i = 0; i < 8; i++) {
+        fishes.push(new Fish(rand(W * 0.15, W * 0.85), rand(H * 0.22, H * 0.72), pickHue(), rand(16, 26), 0));
+      }
+      setTimeout(function () { toast('点水面撒饲料 · 摸摸它们'); }, 900);
+    } else {
+      var hungry = fishes.filter(function (f) { return f.hunger > 0.82; }).length;
+      if (hungry > 0) {
+        setTimeout(function () { toast(hungry + ' 条鱼饿了很久 · 撒点饲料吧'); }, 700);
+      } else {
+        setTimeout(function () { toast('它们还记得你 · ' + fishes.length + ' 条鱼在等你'); }, 700);
+      }
+    }
+
+    setTimeout(function () {
+      var tp = document.getElementById('tips');
+      tp.style.opacity = '0.34';
+    }, 9000);
+
+    window.addEventListener('resize', function () {
+      resize();
+      save();
+    });
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { save(); running = false; }
+      else if (!running) { running = true; lastT = performance.now(); requestAnimationFrame(frame); }
+    });
+
+    window.addEventListener('beforeunload', save);
+
+    requestAnimationFrame(function (t) { lastT = t; requestAnimationFrame(frame); });
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
